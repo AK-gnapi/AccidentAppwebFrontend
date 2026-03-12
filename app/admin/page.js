@@ -2,134 +2,85 @@
 
 import { useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
-import {
-  clearSessionRole,
-  getSessionRole,
-  setSessionRole
-} from "../lib/sessionRole";
+import { supabase } from "../lib/supabase";
+import Link from "next/link";
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:4001";
-
-// Frontend-visible copy of important backend envs, sourced from next-app/.env
-const FRONTEND_CONFIG = {
-  accidentHighSpeedKmh: Number(
-    process.env.NEXT_PUBLIC_ACCIDENT_HIGH_SPEED_KMH || 20
-  ),
-  accidentStopSpeedKmh: Number(
-    process.env.NEXT_PUBLIC_ACCIDENT_STOP_SPEED_KMH || 1
-  ),
-  accidentDropWindowMs: Number(
-    process.env.NEXT_PUBLIC_ACCIDENT_DROP_WINDOW_MS || 5000
-  ),
-  accidentConfirmTimeoutMs: Number(
-    process.env.NEXT_PUBLIC_ACCIDENT_CONFIRM_TIMEOUT_MS || 45000
-  ),
-  hospitalSearchRadiusM: Number(
-    process.env.NEXT_PUBLIC_HOSPITAL_SEARCH_RADIUS_M || 5000
-  ),
-  fastSpeedThresholdKmh: Number(
-    process.env.NEXT_PUBLIC_FAST_SPEED_THRESHOLD_KMH || 5
-  )
-};
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:4001";
 
 function resolveApiBase() {
-  if (typeof window === "undefined") {
-    return API_BASE;
-  }
-
+  if (typeof window === "undefined") return API_BASE;
   try {
     const configured = new URL(API_BASE);
     const pageHost = window.location.hostname;
     const localHosts = new Set(["localhost", "127.0.0.1", "0.0.0.0"]);
     const isIpHost = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(pageHost);
-
-    // Rewrite only for LAN/mobile access by IP, not for public hostnames (e.g. ngrok).
     if (localHosts.has(configured.hostname) && isIpHost) {
       configured.hostname = pageHost;
       return configured.toString().replace(/\/$/, "");
     }
-
     return API_BASE;
   } catch {
     return API_BASE;
   }
 }
 
-export default function AdminPage() {
-  const [adminToken, setAdminToken] = useState("");
-  const [socketStatus, setSocketStatus] = useState("Socket: disconnected");
-  const [socketColor, setSocketColor] = useState("#7f1d1d");
-  const [statusText, setStatusText] = useState("Connecting...");
+const SEVERITY_COLORS = {
+  critical: "#dc2626",
+  high: "#f97316",
+  medium: "#eab308",
+  low: "#22c55e"
+};
+
+export default function AdminDashboard() {
   const [users, setUsers] = useState(new Map());
   const [incidents, setIncidents] = useState(new Map());
-
-  const totalUsers = Array.from(users.values()).length;
-  const fastUsers = Array.from(users.values()).filter(
-    (u) => u.isRunningFast
-  ).length;
+  const [socketStatus, setSocketStatus] = useState("Disconnected");
+  const [apiBase, setApiBase] = useState("");
 
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const markersRef = useRef(new Map());
-  const socketRef = useRef(null);
   const leafletRef = useRef(null);
-  const [isLockedByRole, setIsLockedByRole] = useState(false);
-  const [apiBaseDisplay, setApiBaseDisplay] = useState("");
+  const socketRef = useRef(null);
+
+  const totalUsers = Array.from(users.values()).length;
+  const fastUsers = Array.from(users.values()).filter((u) => u.isRunningFast).length;
+  const activeIncidents = Array.from(incidents.values());
+  const confirmedCount = activeIncidents.filter((i) => i.status === "accident_confirmed").length;
 
   useEffect(() => {
-    const session = getSessionRole();
-    if (session.role === "user") {
-      setIsLockedByRole(true);
-      setStatusText(
-        "User tracking is active in this browser. Stop tracking or clear session to open admin here."
-      );
-    }
-    setApiBaseDisplay(resolveApiBase());
+    setApiBase(resolveApiBase());
   }, []);
 
   useEffect(() => {
     let cancelled = false;
-
     async function initMap() {
       if (!mapRef.current) return;
       const { default: L } = await import("leaflet");
       if (cancelled) return;
       leafletRef.current = L;
-
-      // Avoid "Map container is already initialized" (e.g. React Strict Mode remount)
       if (mapInstanceRef.current) {
         mapInstanceRef.current.remove();
         mapInstanceRef.current = null;
       }
-
-      const mapCenter = [20.5937, 78.9629];
-      const map = L.map(mapRef.current).setView(mapCenter, 5);
+      const map = L.map(mapRef.current).setView([20.5937, 78.9629], 5);
       L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         maxZoom: 19,
         attribution: "&copy; OpenStreetMap contributors"
       }).addTo(map);
-      if (cancelled) {
-        map.remove();
-        return;
-      }
+      if (cancelled) { map.remove(); return; }
       mapInstanceRef.current = map;
     }
-
     initMap();
-
     return () => {
       cancelled = true;
-      if (mapInstanceRef.current) {
-        mapInstanceRef.current.remove();
-        mapInstanceRef.current = null;
-      }
+      if (mapInstanceRef.current) { mapInstanceRef.current.remove(); mapInstanceRef.current = null; }
     };
   }, []);
 
   function markerColor(user) {
     const incident = incidents.get(user.userId);
-    if (incident?.status === "accident_confirmed") return "#b91c1c";
+    if (incident?.status === "accident_confirmed") return "#dc2626";
     if (incident?.status === "pending_confirmation") return "#f59e0b";
     if (user.isStale) return "#64748b";
     if (user.isRunningFast) return "#ef4444";
@@ -158,21 +109,12 @@ export default function AdminPage() {
     if (!map || !L) return;
     const latLng = [user.lat, user.lng];
     const color = markerColor(user);
-    const popup = `
-      <strong>${user.userId}</strong><br/>
-      Speed: ${user.speedKmh.toFixed(2)} km/h<br/>
-      Updated: ${new Date(user.timestamp).toLocaleTimeString()}<br/>
-      State: ${user.isStale ? "stale" : user.isRunningFast ? "fast" : "normal"}
-    `;
+    const popup = `<strong>${user.userId.slice(0, 8)}...</strong><br/>Speed: ${user.speedKmh.toFixed(1)} km/h`;
     const existing = markersRef.current.get(user.userId);
     if (existing) {
       const icon = htmlMarker(color);
-      if (icon) {
-        existing.setLatLng(latLng);
-        existing.setIcon(icon);
-      } else {
-        existing.setLatLng(latLng);
-      }
+      if (icon) { existing.setLatLng(latLng); existing.setIcon(icon); }
+      else existing.setLatLng(latLng);
       existing.bindPopup(popup);
     } else {
       const icon = htmlMarker(color);
@@ -182,22 +124,15 @@ export default function AdminPage() {
   }
 
   function removeUser(userId) {
-    setUsers((prev) => {
-      const next = new Map(prev);
-      next.delete(userId);
-      return next;
-    });
+    setUsers((prev) => { const next = new Map(prev); next.delete(userId); return next; });
     const marker = markersRef.current.get(userId);
-    if (marker) {
-      marker.remove();
-      markersRef.current.delete(userId);
-    }
+    if (marker) { marker.remove(); markersRef.current.delete(userId); }
   }
 
   function upsertIncident(incident) {
     setIncidents((prev) => {
       const next = new Map(prev);
-      if (incident.status === "cleared") {
+      if (incident.status === "cleared" || incident.status === "false_alarm" || incident.status === "resolved") {
         next.delete(incident.userId);
       } else {
         next.set(incident.userId, incident);
@@ -206,100 +141,36 @@ export default function AdminPage() {
     });
   }
 
-  async function loadAdminToken() {
-    if (isLockedByRole) return;
-    const res = await fetch(`${resolveApiBase()}/api/config?role=admin`);
-    if (!res.ok) throw new Error("Failed to load admin token");
-    const data = await res.json();
-    setAdminToken(data.token);
-  }
-
-  async function loadActiveIncidents(token) {
-    const res = await fetch(`${resolveApiBase()}/api/incidents/active`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    if (!res.ok) return;
-    const data = await res.json();
-    setIncidents(() => {
-      const map = new Map();
-      (data.incidents || []).forEach((i) => {
-        map.set(i.userId, i);
-      });
-      return map;
-    });
-  }
-
   useEffect(() => {
-    if (isLockedByRole) return;
-    loadAdminToken()
-      .then(() => {
-        setSessionRole("admin");
-      })
-      .catch((e) => {
-        setStatusText(e.message);
+    let socket = null;
+
+    async function connect() {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+
+      socket = io(resolveApiBase(), {
+        auth: { role: "admin", token: session.access_token },
+        reconnection: true,
+        reconnectionAttempts: Infinity
       });
-  }, [isLockedByRole]);
+      socketRef.current = socket;
 
-  useEffect(() => {
-    if (!adminToken || isLockedByRole) return;
-
-    loadActiveIncidents(adminToken).catch(() => {});
-
-    const socket = io(resolveApiBase(), {
-      auth: {
-        role: "admin",
-        token: adminToken
-      },
-      reconnection: true,
-      reconnectionAttempts: Infinity
-    });
-    socketRef.current = socket;
-
-    socket.on("connect", () => {
-      setSocketStatus("Socket: connected");
-      setSocketColor("#14532d");
-      setStatusText("Live updates active");
-    });
-
-    socket.on("disconnect", (reason) => {
-      setSocketStatus("Socket: disconnected");
-      setSocketColor("#7f1d1d");
-      setStatusText(`Disconnected (${reason}), reconnecting...`);
-    });
-
-    socket.on("snapshot", (snapshot) => {
-      setUsers(() => {
-        const map = new Map();
-        snapshot.forEach((u) => map.set(u.userId, u));
-        return map;
+      socket.on("connect", () => setSocketStatus("Connected"));
+      socket.on("disconnect", () => setSocketStatus("Disconnected"));
+      socket.on("snapshot", (snap) => {
+        setUsers(() => { const m = new Map(); snap.forEach((u) => m.set(u.userId, u)); return m; });
       });
-      // markers updated lazily on render pass
-    });
-
-    socket.on("incident-snapshot", (snapshot) => {
-      setIncidents(() => {
-        const map = new Map();
-        snapshot.forEach((i) => map.set(i.userId, i));
-        return map;
+      socket.on("incident-snapshot", (snap) => {
+        setIncidents(() => { const m = new Map(); snap.forEach((i) => m.set(i.userId, i)); return m; });
       });
-    });
+      socket.on("user-update", (u) => upsertUser(u));
+      socket.on("user-removed", ({ userId }) => removeUser(userId));
+      socket.on("incident-update", (i) => upsertIncident(i));
+    }
 
-    socket.on("user-update", (user) => {
-      upsertUser(user);
-    });
-
-    socket.on("user-removed", ({ userId }) => {
-      removeUser(userId);
-    });
-
-    socket.on("incident-update", (incident) => {
-      upsertIncident(incident);
-    });
-
-    return () => {
-      socket.disconnect();
-    };
-  }, [adminToken]);
+    connect();
+    return () => { if (socket) socket.disconnect(); };
+  }, []);
 
   useEffect(() => {
     const map = mapInstanceRef.current;
@@ -307,122 +178,198 @@ export default function AdminPage() {
     Array.from(users.values()).forEach((u) => upsertUser(u));
   }, [users, incidents]);
 
-  const userCards = Array.from(users.values())
-    .sort((a, b) => b.timestamp - a.timestamp)
-    .map((u) => {
-      const incident = incidents.get(u.userId);
-      const cls = u.isStale
-        ? "user-item stale"
-        : u.isRunningFast
-        ? "user-item fast"
-        : "user-item";
-      return (
-        <div key={u.userId} className={cls}>
-          <div>
-            <strong>{u.userId}</strong>
-          </div>
-          <div>speed: {u.speedKmh.toFixed(2)} km/h</div>
-          <div>updated: {new Date(u.timestamp).toLocaleTimeString()}</div>
-          <div>
-            state: {u.isStale ? "stale" : u.isRunningFast ? "fast (>5)" : "normal"}
-          </div>
-          {incident && (
-            <div>incident: {incident.status.replaceAll("_", " ")}</div>
-          )}
-        </div>
-      );
-    });
-
-  const incidentCards = Array.from(incidents.values())
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .map((incident) => {
-      const isConfirmed = incident.status === "accident_confirmed";
-      const remaining = Math.max(
-        Math.ceil((incident.timeRemainingMs || 0) / 1000),
-        0
-      );
-      const hospitals = (incident.hospitals || []).map((h) => (
-        <li key={`${incident.incidentId}-${h.name}-${h.phone}`}>
-          {h.name} ({h.distanceKm} km) -{" "}
-          <a href={`tel:${h.phone}`}>{h.phone}</a>
-        </li>
-      ));
-      return (
-        <div
-          key={incident.incidentId}
-          className={`user-item ${isConfirmed ? "fast" : ""}`}
-        >
-          <div>
-            <strong>{incident.userId}</strong>
-          </div>
-          <div>status: {incident.status.replaceAll("_", " ")}</div>
-          {incident.status === "pending_confirmation" && (
-            <div>user response wait: {remaining}s</div>
-          )}
-          {isConfirmed && (
-            <div style={{ marginTop: 6 }}>
-              <strong>Nearby hospitals:</strong>
-              <ul style={{ paddingLeft: 16 }}>
-                {hospitals.length ? hospitals : <li>No hospitals found</li>}
-              </ul>
-            </div>
-          )}
-        </div>
-      );
-    });
-
   return (
-    <div className="container">
-      <div className="topbar">
-        <strong>Admin Interface (Next.js)</strong>
-        <span className="badge" style={{ background: socketColor }}>
+    <div style={styles.page}>
+      <div style={styles.topBar}>
+        <h2 style={styles.pageTitle}>Dashboard</h2>
+        <span style={{ ...styles.badge, background: socketStatus === "Connected" ? "#065f46" : "#7f1d1d" }}>
           {socketStatus}
         </span>
-        <span className="badge">Users: {totalUsers}</span>
-        <span className="badge">Fast: {fastUsers}</span>
-        <span className="status">{statusText}</span>
-        <span className="status" style={{ fontSize: "0.85rem", color: "#64748b" }}>
-          API: {apiBaseDisplay || "—"}
-        </span>
-        <button
-          className="btn secondary"
-          style={{ marginLeft: "auto" }}
-          onClick={() => {
-            clearSessionRole();
-            window.location.href = "/";
-          }}
-        >
-          Clear session
-        </button>
+        <span style={styles.apiLabel}>API: {apiBase || "—"}</span>
       </div>
-      <div className="grid">
-        <aside className="panel">
-          <h3 style={{ marginTop: 0 }}>Live Users</h3>
-          <div className="status" style={{ fontSize: "0.8rem", marginBottom: 8 }}>
-            Config (from next-app .env): fast &gt;{" "}
-            {FRONTEND_CONFIG.fastSpeedThresholdKmh} km/h, accident high &gt;{" "}
-            {FRONTEND_CONFIG.accidentHighSpeedKmh} km/h, confirm timeout{" "}
-            {Math.round(FRONTEND_CONFIG.accidentConfirmTimeoutMs / 1000)}s
-          </div>
-          <div id="usersList">
-            {userCards.length ? (
-              userCards
-            ) : (
-              <div className="status">No active users</div>
-            )}
-          </div>
-          <h3>Incident Alerts</h3>
-          <div id="incidentsList">
-            {incidentCards.length ? (
-              incidentCards
-            ) : (
-              <div className="status">No active incidents</div>
-            )}
-          </div>
-        </aside>
-        <main ref={mapRef} className="map" />
+
+      <div style={styles.statsRow}>
+        <StatCard label="Active Users" value={totalUsers} color="#38bdf8" />
+        <StatCard label="Fast Users" value={fastUsers} color="#f97316" />
+        <StatCard label="Active Incidents" value={activeIncidents.length} color="#ef4444" />
+        <StatCard label="Confirmed" value={confirmedCount} color="#dc2626" />
+      </div>
+
+      <div style={styles.content}>
+        <div ref={mapRef} style={styles.map} />
+        <div style={styles.incidentPanel}>
+          <h3 style={styles.panelTitle}>Active Incidents</h3>
+          {activeIncidents.length === 0 && (
+            <p style={styles.muted}>No active incidents</p>
+          )}
+          {activeIncidents
+            .sort((a, b) => b.updatedAt - a.updatedAt)
+            .map((inc) => (
+              <Link
+                key={inc.incidentId}
+                href={`/admin/incidents?id=${inc.incidentId}`}
+                style={styles.incidentCard}
+              >
+                <div style={styles.incidentHeader}>
+                  <span style={{ ...styles.severityDot, background: SEVERITY_COLORS[inc.severity] || "#eab308" }} />
+                  <strong>{inc.userId.slice(0, 8)}...</strong>
+                  <span style={styles.incidentBadge}>{inc.status.replace(/_/g, " ")}</span>
+                </div>
+                <div style={styles.incidentMeta}>
+                  {inc.severity} severity · {inc.detectionMethod || "behavior"} detection
+                </div>
+                {inc.status === "pending_confirmation" && (
+                  <div style={styles.countdown}>
+                    Response wait: {Math.max(Math.ceil((inc.timeRemainingMs || 0) / 1000), 0)}s
+                  </div>
+                )}
+              </Link>
+            ))}
+          <Link href="/admin/incidents" style={styles.viewAllLink}>
+            View all incidents →
+          </Link>
+        </div>
       </div>
     </div>
   );
 }
 
+function StatCard({ label, value, color }) {
+  return (
+    <div style={styles.statCard}>
+      <div style={{ ...styles.statValue, color }}>{value}</div>
+      <div style={styles.statLabel}>{label}</div>
+    </div>
+  );
+}
+
+const styles = {
+  page: {
+    padding: 24,
+    color: "#e2e8f0"
+  },
+  topBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: 16,
+    marginBottom: 24,
+    flexWrap: "wrap"
+  },
+  pageTitle: {
+    margin: 0,
+    fontSize: 22,
+    fontWeight: 800
+  },
+  badge: {
+    padding: "4px 10px",
+    borderRadius: 999,
+    fontSize: 12,
+    color: "#e2e8f0"
+  },
+  apiLabel: {
+    fontSize: 12,
+    color: "#64748b",
+    marginLeft: "auto"
+  },
+  statsRow: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+    gap: 16,
+    marginBottom: 24
+  },
+  statCard: {
+    background: "#1e293b",
+    border: "1px solid #334155",
+    borderRadius: 12,
+    padding: "16px 20px"
+  },
+  statValue: {
+    fontSize: 28,
+    fontWeight: 800,
+    lineHeight: 1
+  },
+  statLabel: {
+    fontSize: 13,
+    color: "#94a3b8",
+    marginTop: 4
+  },
+  content: {
+    display: "grid",
+    gridTemplateColumns: "1fr 340px",
+    gap: 16,
+    minHeight: 0
+  },
+  map: {
+    height: "calc(100vh - 280px)",
+    borderRadius: 12,
+    border: "1px solid #334155",
+    overflow: "hidden",
+    minHeight: 400
+  },
+  incidentPanel: {
+    background: "#1e293b",
+    border: "1px solid #334155",
+    borderRadius: 12,
+    padding: 16,
+    overflow: "auto",
+    maxHeight: "calc(100vh - 280px)"
+  },
+  panelTitle: {
+    margin: "0 0 12px",
+    fontSize: 15,
+    fontWeight: 700
+  },
+  muted: {
+    color: "#64748b",
+    fontSize: 13
+  },
+  incidentCard: {
+    display: "block",
+    background: "#0f172a",
+    border: "1px solid #334155",
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 8,
+    textDecoration: "none",
+    color: "#e2e8f0",
+    transition: "border-color 150ms"
+  },
+  incidentHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    fontSize: 13
+  },
+  severityDot: {
+    width: 10,
+    height: 10,
+    borderRadius: "50%",
+    flexShrink: 0
+  },
+  incidentBadge: {
+    marginLeft: "auto",
+    fontSize: 11,
+    padding: "2px 8px",
+    borderRadius: 999,
+    background: "#334155",
+    textTransform: "capitalize"
+  },
+  incidentMeta: {
+    fontSize: 12,
+    color: "#94a3b8",
+    marginTop: 4
+  },
+  countdown: {
+    fontSize: 12,
+    color: "#f59e0b",
+    marginTop: 4
+  },
+  viewAllLink: {
+    display: "block",
+    marginTop: 12,
+    fontSize: 13,
+    color: "#38bdf8",
+    textDecoration: "none",
+    textAlign: "center"
+  }
+};

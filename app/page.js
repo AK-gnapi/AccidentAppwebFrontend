@@ -49,12 +49,12 @@ export default function Home() {
                 </p>
 
                 <div className="mkt-actions">
-                  <Link href="/user" className="mkt-primary">
-                    Start as User
+                  <Link href="/admin" className="mkt-primary">
+                    Open Admin Dashboard
                   </Link>
-                  <Link href="/admin" className="mkt-secondary">
-                    View Admin Map
-                  </Link>
+                  <a href="#features" className="mkt-secondary">
+                    Learn More
+                  </a>
                 </div>
 
                 <div className="mkt-meta">
@@ -221,11 +221,8 @@ export default function Home() {
                 </div>
               </div>
               <div className="mkt-actions">
-                <Link href="/user" className="mkt-primary">
-                  Start as User
-                </Link>
-                <Link href="/admin" className="mkt-secondary">
-                  Open Dashboard
+                <Link href="/admin" className="mkt-primary">
+                  Open Admin Dashboard
                 </Link>
               </div>
             </div>
